@@ -1,0 +1,120 @@
+name: AEthX-AEsc relocated apt repo
+
+# Termux's prebuilt debs, relocated from /data/data/com.termux/ to /data/data/aethx.aesc/.
+# Both prefixes are 10 characters, so binaries keep their layout (byte-for-byte swap).
+# Publishes a flat apt repo as a GitHub release: deb <release-url>/ ./
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        type: choice
+        options: [aarch64, x86_64]
+        default: aarch64
+
+permissions: {}
+
+concurrency:
+  group: aesc-relocate-${{ inputs.arch }}
+  cancel-in-progress: false
+
+jobs:
+  relocate:
+    if: github.repository == 'c10vis-poem/termux-packages'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ARCH: ${{ inputs.arch }}
+      TAG: aesc-apt-${{ inputs.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: aesc
+      - name: Resolve package set (list + dependency closure)
+        run: |
+          python3 - <<'EOF'
+          import os, re, urllib.request
+          arch = os.environ["ARCH"]
+          # (repo base, dist, component) as in the operator's Termux sources.list
+          srcs = [("https://packages-cf.termux.dev/apt/termux-main", "stable", "main"),
+                  ("https://packages-cf.termux.dev/apt/termux-x11", "x11", "main"),
+                  ("https://packages-cf.termux.dev/apt/termux-root", "root", "stable"),
+                  ("https://packages-cf.termux.dev/apt/termux-glibc", "glibc", "stable"),
+                  ("https://tur.kcubeterm.com", "tur-packages", "tur"),
+                  ("https://tur.kcubeterm.com", "tur-packages", "tur-on-device"),
+                  ("https://tur.kcubeterm.com", "tur-packages", "tur-continuous")]
+          def get(u):
+              return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "apt/2.7"})).read().decode()
+          idx = {}
+          for repo, dist, comp in srcs:
+              for a in (arch, "all"):
+                  try:
+                      txt = get(f"{repo}/dists/{dist}/{comp}/binary-{a}/Packages")
+                  except Exception as e:
+                      print("skip", repo, comp, a, e); continue
+                  for blk in txt.split("\n\n"):
+                      f = dict(re.findall(r"^([A-Za-z0-9-]+): (.*)$", blk, re.M))
+                      if "Package" in f and "Filename" in f and f["Package"] not in idx:
+                          idx[f["Package"]] = (repo + "/" + f["Filename"], f.get("Depends", "") + ", " + f.get("Pre-Depends", ""), f.get("SHA256", ""))
+          want = [l.split()[0] for l in open("aesc/packages.txt") if l.strip() and not l.startswith("#")]
+          seen, todo, missing = set(), list(want), []
+          while todo:
+              p = todo.pop()
+              if p in seen: continue
+              if p not in idx: missing.append(p); continue
+              seen.add(p)
+              for alt in idx[p][1].split(","):
+                  d = alt.split("|")[0].strip().split(" ")[0]
+                  if d: todo.append(d)
+          open("urls.txt", "w").write("".join(f"{idx[p][0]}\t{idx[p][2]}\n" for p in sorted(seen)))
+          print(f"requested {len(want)}, resolved {len(seen)}, missing {len(missing)}: {sorted(set(missing))}")
+          EOF
+      - name: Download (sha256-checked)
+        run: |
+          mkdir -p dl
+          while IFS=$'\t' read -r url sha; do
+            f="dl/$(basename "$url")"
+            curl -fsSL --retry 3 -A "apt/2.7" -o "$f" "$url"
+            echo "$sha  $f" | sha256sum -c --quiet
+          done < urls.txt
+          ls dl | wc -l; du -sh dl
+      - name: Relocate
+        run: |
+          mkdir -p out x
+          for d in dl/*.deb; do
+            n=$(basename "$d" .deb); r="x/$n"
+            dpkg-deb -R "$d" "$r"
+            find "$r" -type f ! -path '*/DEBIAN/md5sums' -exec perl -pi -e 's#/data/data/com\.termux/#/data/data/aethx.aesc/#g' {} +
+            [ -d "$r/data/data/com.termux" ] && mv "$r/data/data/com.termux" "$r/data/data/aethx.aesc"
+            find "$r/DEBIAN" \( -name preinst -o -name postinst -o -name prerm -o -name postrm -o -name config \) -exec chmod 755 {} +
+            ( cd "$r" && find data -type f -exec md5sum {} + > DEBIAN/md5sums )
+            dpkg-deb -b --root-owner-group "$r" out/ >/dev/null
+            rm -rf "$r"
+          done
+          # GitHub release asset names can't hold every deb character; keep Filename and asset name identical.
+          for f in out/*.deb; do s=$(basename "$f" | tr '+~:' '___'); [ "$s" = "$(basename "$f")" ] || mv "$f" "out/$s"; done
+          bad=0; for f in out/*.deb; do dpkg-deb --fsys-tarfile "$f" | grep -qa '/data/data/com\.termux/' && { echo "LEFT: $f"; bad=1; }; done
+          ls out | wc -l; exit $bad
+      - name: Index and sign
+        env:
+          GPG_KEY: ${{ secrets.AESC_APT_GPG_KEY }}
+        run: |
+          cd out
+          apt-ftparchive packages . > Packages && gzip -kf Packages
+          apt-ftparchive release . > Release
+          if [ -n "$GPG_KEY" ]; then
+            echo "$GPG_KEY" | gpg --batch --import
+            gpg --batch --yes -abs -o Release.gpg Release
+            gpg --batch --yes --clearsign -o InRelease Release
+          else
+            echo "::warning::AESC_APT_GPG_KEY not set; repo is unsigned"
+          fi
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "AEthX-AEsc apt ($ARCH)" --notes "Flat apt repo for aethx.aesc. sources.list: deb https://github.com/${GH_REPO}/releases/download/${TAG}/ ./"
+          cd out && gh release upload "$TAG" --clobber ./*
