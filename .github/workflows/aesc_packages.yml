@@ -15,10 +15,6 @@ on:
         type: choice
         options: [aarch64, x86_64]
         default: aarch64
-      use_repo_deps:
-        description: "Download deps from the aesc repo (-i) instead of building them"
-        type: boolean
-        default: false
 
 permissions: {}
 
@@ -45,15 +41,23 @@ jobs:
         run: |
           sed -i "s/^TERMUX_APP__PACKAGE_NAME=\"com.termux\"$/TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"/" scripts/properties.sh
           grep -qx "TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"" scripts/properties.sh
-          jq --arg u "$AESC_REPO_URL" '.packages.url=$u | .packages.name="aesc-main"' repo.json > r && mv r repo.json
+          jq --arg u "$AESC_REPO_URL" 'with_entries(if (.value|type)=="object" then .value += {url:$u, distribution:"stable", component:"main"} else . end)' repo.json > r && mv r repo.json
+          cat repo.json
+      - name: Restore built packages
+        uses: actions/cache/restore@v4
+        with:
+          path: output
+          key: aesc-debs-${{ inputs.arch }}-${{ github.run_id }}
+          restore-keys: aesc-debs-${{ inputs.arch }}-
       - name: Build
         env:
           PKGS: ${{ inputs.packages }}
-          DEPS: ${{ inputs.use_repo_deps }}
           ARCH: ${{ inputs.arch }}
         run: |
           flags=(-a "$ARCH" -o output)
-          [ "$DEPS" = true ] && flags+=(-i)
+          # Reuse our repo + cached debs once the signed repo exists; otherwise build deps from source.
+          curl -fsI "$AESC_REPO_URL/dists/stable/Release" >/dev/null && flags+=(-i --reuse-built-packages)
+          echo "flags: ${flags[*]}"
           read -ra list <<< "$PKGS"
           ./scripts/run-docker.sh bash -c '
             [ -f aesc-repo.asc ] && gpg --import aesc-repo.asc
@@ -67,6 +71,12 @@ jobs:
           done
           ls output/*.deb
           exit $bad
+      - name: Save built packages
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: output
+          key: aesc-debs-${{ inputs.arch }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
