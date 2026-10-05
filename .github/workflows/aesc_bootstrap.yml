@@ -46,6 +46,11 @@ jobs:
         run: |
           sed -i "s/^TERMUX_APP__PACKAGE_NAME=\"com.termux\"$/TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"/" scripts/properties.sh
           grep -qx "TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"" scripts/properties.sh
+      - name: Build subpackages via their parent recipe
+        # Upstream build-bootstraps.sh lists bzip2, now a subpackage of libbz2; build the parent instead.
+        run: |
+          perl -0pi -e 's/(\tlocal package_name="\$2"\n)/$1\t[ -d "packages\/\$package_name" ] || { _sub=\$(ls packages\/*\/"\$package_name".subpackage.sh 2>\/dev\/null | head -1); [ -n "\$_sub" ] && package_name=\$(basename "\$(dirname "\$_sub")"); }\n/' scripts/build-bootstraps.sh
+          grep -A1 'local package_name="\$2"' scripts/build-bootstraps.sh | grep -q subpackage.sh
       - name: Build bootstrap (${{ matrix.arch }})
         env:
           ADD: ${{ inputs.add }}
