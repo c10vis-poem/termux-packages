@@ -51,13 +51,26 @@ jobs:
         run: |
           perl -0pi -e 's/(\tlocal package_name="\$2"\n)/$1\t[ -d "packages\/\$package_name" ] || { _sub=\$(ls packages\/*\/"\$package_name".subpackage.sh 2>\/dev\/null | head -1); [ -n "\$_sub" ] && package_name=\$(basename "\$(dirname "\$_sub")"); }\n/' scripts/build-bootstraps.sh
           grep -A1 'local package_name="\$2"' scripts/build-bootstraps.sh | grep -q subpackage.sh
+      - name: Host dirs for the build container
+        run: |
+          sudo mkdir -p /data/data "$HOME/.termux-build"
+          sudo chmod 777 /data /data/data "$HOME/.termux-build"
+      - name: Restore built packages
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /data/data/.built-packages
+            /data/data/aethx.aesc
+            output
+          key: aesc-bootstrap-${{ matrix.arch }}-${{ github.run_id }}
+          restore-keys: aesc-bootstrap-${{ matrix.arch }}-
       - name: Build bootstrap (${{ matrix.arch }})
         env:
           ADD: ${{ inputs.add }}
         run: |
           args=(--architectures ${{ matrix.arch }})
           [ -n "$ADD" ] && args+=(--add "$ADD")
-          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh "${args[@]}" 2>&1 | tee build.log
+          ./scripts/run-docker.sh -m ./scripts/build-bootstraps.sh "${args[@]}" 2>&1 | tee build.log
           exit "${PIPESTATUS[0]}"
       - name: Verify prefix
         run: |
@@ -66,6 +79,15 @@ jobs:
           unzip -o -q "$z" bin/bash -d chk
           grep -c "/data/data/$AESC_PACKAGE_NAME/files/usr" chk/bin/bash
           ! grep -q "/data/data/com.termux/" chk/bin/bash
+      - name: Save built packages
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /data/data/.built-packages
+            /data/data/aethx.aesc
+            output
+          key: aesc-bootstrap-${{ matrix.arch }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
