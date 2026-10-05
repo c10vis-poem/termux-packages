@@ -10,6 +10,11 @@ on:
       packages:
         description: "Space-separated package names"
         required: true
+      arch:
+        description: "aarch64 or x86_64"
+        type: choice
+        options: [aarch64, x86_64]
+        default: aarch64
       use_repo_deps:
         description: "Download deps from the aesc repo (-i) instead of building them"
         type: boolean
@@ -45,8 +50,9 @@ jobs:
         env:
           PKGS: ${{ inputs.packages }}
           DEPS: ${{ inputs.use_repo_deps }}
+          ARCH: ${{ inputs.arch }}
         run: |
-          flags=(-a aarch64 -o output)
+          flags=(-a "$ARCH" -o output)
           [ "$DEPS" = true ] && flags+=(-i)
           read -ra list <<< "$PKGS"
           ./scripts/run-docker.sh bash -c '
@@ -89,12 +95,14 @@ jobs:
           [ -n "$GPG_KEY" ] || { echo "AESC_APT_GPG_KEY secret missing"; exit 1; }
           sudo apt-get install -y apt-utils >/dev/null
           echo "$GPG_KEY" | gpg --batch --import
-          mkdir -p pool/main dists/stable/main/binary-aarch64
+          mkdir -p pool/main dists/stable/main/binary-aarch64 dists/stable/main/binary-x86_64
           cp incoming/output/*.deb pool/main/
-          apt-ftparchive packages pool/main > dists/stable/main/binary-aarch64/Packages
-          gzip -kf dists/stable/main/binary-aarch64/Packages
+          for a in aarch64 x86_64; do
+            apt-ftparchive --arch "$a" packages pool/main > "dists/stable/main/binary-$a/Packages"
+            gzip -kf "dists/stable/main/binary-$a/Packages"
+          done
           apt-ftparchive -o APT::FTPArchive::Release::Suite=stable -o APT::FTPArchive::Release::Codename=stable \
-            -o APT::FTPArchive::Release::Components=main -o APT::FTPArchive::Release::Architectures=aarch64 \
+            -o APT::FTPArchive::Release::Components=main -o APT::FTPArchive::Release::Architectures="aarch64 x86_64" \
             release dists/stable > dists/stable/Release
           gpg --batch --yes -abs -o dists/stable/Release.gpg dists/stable/Release
           gpg --batch --yes --clearsign -o dists/stable/InRelease dists/stable/Release
