@@ -34,6 +34,10 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, x86_64]
     steps:
       - uses: actions/checkout@v4
       - name: Free disk space
@@ -42,11 +46,11 @@ jobs:
         run: |
           sed -i "s/^TERMUX_APP__PACKAGE_NAME=\"com.termux\"$/TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"/" scripts/properties.sh
           grep -qx "TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"" scripts/properties.sh
-      - name: Build bootstrap (aarch64)
+      - name: Build bootstrap (${{ matrix.arch }})
         env:
           ADD: ${{ inputs.add }}
         run: |
-          args=(--architectures aarch64)
+          args=(--architectures ${{ matrix.arch }})
           [ -n "$ADD" ] && args+=(--add "$ADD")
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh "${args[@]}" 2>&1 | tee build.log
           exit "${PIPESTATUS[0]}"
@@ -60,7 +64,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: aesc-bootstrap-aarch64-${{ github.sha }}
+          name: aesc-bootstrap-${{ matrix.arch }}-${{ github.sha }}
           path: |
             bootstrap-*.zip
             build.log
@@ -82,4 +86,4 @@ jobs:
         run: |
           tag="aesc-bootstrap-$(date +%Y.%m.%d)-${{ github.run_number }}"
           sha256sum bootstrap-*.zip > SHA256SUMS
-          gh release create "$tag" --title "AEthX-AEsc bootstrap ($tag)" --notes "apt bootstrap for aethx.aesc" bootstrap-*.zip SHA256SUMS
+          gh release create "$tag" --title "AEthX-AEsc bootstrap ($tag)" --notes "apt bootstrap for aethx.aesc (aarch64, x86_64)" bootstrap-*.zip SHA256SUMS
