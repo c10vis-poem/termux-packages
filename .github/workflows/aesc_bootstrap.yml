@@ -1,0 +1,85 @@
+name: AEthX-AEsc bootstrap (aethx.aesc)
+
+# Builds apt bootstrap archives from source for the AEthX-AEsc app.
+# The package name is patched at build time so master stays syncable with upstream.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/aesc_bootstrap.yml"
+  workflow_dispatch:
+    inputs:
+      add:
+        description: "Extra packages, comma-separated"
+        required: false
+        default: ""
+      publish:
+        description: "Publish a GitHub release"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AESC_PACKAGE_NAME: aethx.aesc
+
+jobs:
+  build:
+    if: github.repository == 'c10vis-poem/termux-packages'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Set package name
+        run: |
+          sed -i "s/^TERMUX_APP__PACKAGE_NAME=\"com.termux\"$/TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"/" scripts/properties.sh
+          grep -qx "TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"" scripts/properties.sh
+      - name: Build bootstrap (aarch64)
+        env:
+          ADD: ${{ inputs.add }}
+        run: |
+          args=(--architectures aarch64)
+          [ -n "$ADD" ] && args+=(--add "$ADD")
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh "${args[@]}" 2>&1 | tee build.log
+          exit "${PIPESTATUS[0]}"
+      - name: Verify prefix
+        run: |
+          z=$(ls bootstrap-*.zip | head -1)
+          unzip -p "$z" SYMLINKS.txt | grep -q . 
+          unzip -o -q "$z" bin/bash -d chk
+          grep -c "/data/data/$AESC_PACKAGE_NAME/files/usr" chk/bin/bash
+          ! grep -q "/data/data/com.termux/" chk/bin/bash
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aesc-bootstrap-aarch64-${{ github.sha }}
+          path: |
+            bootstrap-*.zip
+            build.log
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: build
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="aesc-bootstrap-$(date +%Y.%m.%d)-${{ github.run_number }}"
+          sha256sum bootstrap-*.zip > SHA256SUMS
+          gh release create "$tag" --title "AEthX-AEsc bootstrap ($tag)" --notes "apt bootstrap for aethx.aesc" bootstrap-*.zip SHA256SUMS
