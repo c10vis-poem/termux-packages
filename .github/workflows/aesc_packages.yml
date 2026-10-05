@@ -1,0 +1,103 @@
+name: AEthX-AEsc packages (aethx.aesc)
+
+# Builds packages from source for aethx.aesc and publishes a signed apt repo
+# on the gh-pages branch (https://c10vis-poem.github.io/termux-packages/).
+# Build tiers in order; later tiers pull earlier tiers' debs from that repo (-i).
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Space-separated package names"
+        required: true
+      use_repo_deps:
+        description: "Download deps from the aesc repo (-i) instead of building them"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: aesc-packages
+  cancel-in-progress: false
+
+env:
+  AESC_PACKAGE_NAME: aethx.aesc
+  AESC_REPO_URL: https://c10vis-poem.github.io/termux-packages
+
+jobs:
+  build:
+    if: github.repository == 'c10vis-poem/termux-packages'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Point build at aethx.aesc
+        run: |
+          sed -i "s/^TERMUX_APP__PACKAGE_NAME=\"com.termux\"$/TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"/" scripts/properties.sh
+          grep -qx "TERMUX_APP__PACKAGE_NAME=\"$AESC_PACKAGE_NAME\"" scripts/properties.sh
+          jq --arg u "$AESC_REPO_URL" '.packages.url=$u | .packages.name="aesc-main"' repo.json > r && mv r repo.json
+      - name: Build
+        env:
+          PKGS: ${{ inputs.packages }}
+          DEPS: ${{ inputs.use_repo_deps }}
+        run: |
+          flags=(-a aarch64 -o output)
+          [ "$DEPS" = true ] && flags+=(-i)
+          read -ra list <<< "$PKGS"
+          ./scripts/run-docker.sh bash -c '
+            [ -f aesc-repo.asc ] && gpg --import aesc-repo.asc
+            ./build-package.sh "$@"' _ "${flags[@]}" "${list[@]}" 2>&1 | tee build.log
+          exit "${PIPESTATUS[0]}"
+      - name: Verify prefix
+        run: |
+          bad=0
+          for d in output/*.deb; do
+            dpkg-deb -c "$d" | grep -q "/data/data/com.termux/" && { echo "com.termux path in $d"; bad=1; }
+          done
+          ls output/*.deb
+          exit $bad
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aesc-debs-${{ github.run_id }}
+          path: |
+            output/*.deb
+            build.log
+
+  publish:
+    needs: build
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+      - uses: actions/download-artifact@v4
+        with:
+          name: aesc-debs-${{ github.run_id }}
+          path: incoming
+      - name: Update apt repo
+        env:
+          GPG_KEY: ${{ secrets.AESC_APT_GPG_KEY }}
+        run: |
+          [ -n "$GPG_KEY" ] || { echo "AESC_APT_GPG_KEY secret missing"; exit 1; }
+          sudo apt-get install -y apt-utils >/dev/null
+          echo "$GPG_KEY" | gpg --batch --import
+          mkdir -p pool/main dists/stable/main/binary-aarch64
+          cp incoming/output/*.deb pool/main/
+          apt-ftparchive packages pool/main > dists/stable/main/binary-aarch64/Packages
+          gzip -kf dists/stable/main/binary-aarch64/Packages
+          apt-ftparchive -o APT::FTPArchive::Release::Suite=stable -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Components=main -o APT::FTPArchive::Release::Architectures=aarch64 \
+            release dists/stable > dists/stable/Release
+          gpg --batch --yes -abs -o dists/stable/Release.gpg dists/stable/Release
+          gpg --batch --yes --clearsign -o dists/stable/InRelease dists/stable/Release
+          git config user.name github-actions; git config user.email github-actions@users.noreply.github.com
+          git add pool dists
+          git commit -m "aesc: publish ${{ github.run_id }}" && git push
