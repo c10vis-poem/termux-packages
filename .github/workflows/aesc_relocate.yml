@@ -89,7 +89,8 @@ jobs:
             find "$r" -type f ! -path '*/DEBIAN/md5sums' -exec perl -pi -e 's#/data/data/com\.termux/#/data/data/aethx.aesc/#g' {} +
             [ -d "$r/data/data/com.termux" ] && mv "$r/data/data/com.termux" "$r/data/data/aethx.aesc"
             find "$r/DEBIAN" \( -name preinst -o -name postinst -o -name prerm -o -name postrm -o -name config \) -exec chmod 755 {} +
-            ( cd "$r" && find data -type f -exec md5sum {} + > DEBIAN/md5sums )
+            # metapackages have no data/ tree; md5sums covers whatever payload exists
+            ( cd "$r" && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | xargs -0r md5sum > DEBIAN/md5sums )
             dpkg-deb -b --root-owner-group "$r" out/ >/dev/null
             rm -rf "$r"
           done
