@@ -83,20 +83,15 @@ jobs:
       - name: Relocate
         run: |
           mkdir -p out x
-          for d in dl/*.deb; do
-            n=$(basename "$d" .deb); r="x/$n"
-            dpkg-deb -R "$d" "$r"
-            find "$r" -type f ! -path '*/DEBIAN/md5sums' -exec perl -pi -e 's#/data/data/com\.termux/#/data/data/aethx.aesc/#g' {} +
-            [ -d "$r/data/data/com.termux" ] && mv "$r/data/data/com.termux" "$r/data/data/aethx.aesc"
-            find "$r/DEBIAN" \( -name preinst -o -name postinst -o -name prerm -o -name postrm -o -name config \) -exec chmod 755 {} +
-            ( cd "$r" && find data -type f -exec md5sum {} + > DEBIAN/md5sums )
-            dpkg-deb -b --root-owner-group "$r" out/ >/dev/null
-            rm -rf "$r"
-          done
+          # One bad upstream package must not sink the repo: skip it, list it, publish the rest.
+          : > failed.txt
+          for d in dl/*.deb; do bash aesc/relocate-deb.sh "$d" x out 2> err.txt || echo "$(basename "$d"): $(grep -v 'valid architecture\|ignoring 1 warning\|parsing file' err.txt | tail -1)" >> failed.txt; done
           # GitHub release asset names can't hold every deb character; keep Filename and asset name identical.
           for f in out/*.deb; do s=$(basename "$f" | tr '+~:' '___'); [ "$s" = "$(basename "$f")" ] || mv "$f" "out/$s"; done
-          bad=0; for f in out/*.deb; do dpkg-deb --fsys-tarfile "$f" | grep -qa '/data/data/com\.termux/' && { echo "LEFT: $f"; bad=1; }; done
-          ls out | wc -l; exit $bad
+          for f in out/*.deb; do if dpkg-deb --fsys-tarfile "$f" | grep -qa '/data/data/com\.termux/'; then echo "$(basename "$f"): com.termux path left after relocation" >> failed.txt; rm "$f"; fi; done
+          echo "relocated $(ls out | wc -l), skipped $(wc -l < failed.txt)"
+          { echo "### Skipped packages"; sed 's/^/- /' failed.txt; } >> "$GITHUB_STEP_SUMMARY"
+          cp failed.txt out/SKIPPED.txt
       - name: Index and sign
         env:
           GPG_KEY: ${{ secrets.AESC_APT_GPG_KEY }}
@@ -117,4 +112,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "AEthX-AEsc apt ($ARCH)" --notes "Flat apt repo for aethx.aesc. sources.list: deb https://github.com/${GH_REPO}/releases/download/${TAG}/ ./"
-          cd out && gh release upload "$TAG" --clobber ./*
+          cd out
+          # Resumable and paced: GitHub's secondary rate limit trips on ~500 back-to-back uploads.
+          have=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          up() { for t in 1 2 3 4 5; do gh release upload "$TAG" --clobber "$1" && return 0; sleep $((t * 60)); done; return 1; }
+          for f in *.deb; do grep -qxF "$f" <<<"$have" || { up "$f"; sleep 1; }; done
+          # Index last, so apt never sees a Packages entry whose deb isn't uploaded yet.
+          for f in SKIPPED.txt Packages Packages.gz Release Release.gpg InRelease; do if [ -f "$f" ]; then up "$f"; fi; done
